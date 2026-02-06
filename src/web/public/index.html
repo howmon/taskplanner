@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TaskPlanner — AI-Powered Task Management</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">🧠</span>
+          <span class="logo-text">TaskPlanner</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a class="nav-item active" data-view="myday" onclick="switchView('myday')">
+          <span class="nav-icon">☀️</span>
+          <span>My Day</span>
+          <span class="nav-badge" id="myday-badge"></span>
+        </a>
+        <a class="nav-item" data-view="board" onclick="switchView('board')">
+          <span class="nav-icon">📋</span>
+          <span>Board</span>
+        </a>
+        <a class="nav-item" data-view="list" onclick="switchView('list')">
+          <span class="nav-icon">📝</span>
+          <span>All Tasks</span>
+          <span class="nav-badge" id="tasks-badge"></span>
+        </a>
+        <a class="nav-item" data-view="sprints" onclick="switchView('sprints')">
+          <span class="nav-icon">🏃</span>
+          <span>Sprints</span>
+        </a>
+        <a class="nav-item" data-view="analytics" onclick="switchView('analytics')">
+          <span class="nav-icon">📊</span>
+          <span>Analytics</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="ai-badge" id="ai-status">
+          <span>🤖</span>
+          <span id="ai-status-text">AI Loading...</span>
+        </div>
+        <button class="btn-icon" onclick="toggleTheme()" title="Toggle theme">🌓</button>
+        <a class="repo-link" id="repo-link" href="#" target="_blank" title="Open GitHub repo">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Header -->
+      <header class="main-header">
+        <div class="header-left">
+          <h1 id="view-title">My Day</h1>
+          <span class="header-date" id="header-date"></span>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-primary" onclick="openAddTask()">
+            <span>+</span> Add Task
+          </button>
+          <button class="btn btn-ghost" onclick="aiPlanDay()" id="ai-plan-btn" title="AI Plan My Day">
+            🧠 Plan
+          </button>
+          <button class="btn btn-ghost" onclick="refreshData()">🔄</button>
+        </div>
+      </header>
+
+      <!-- Views -->
+      <div id="view-myday" class="view active">
+        <div class="myday-container">
+          <div class="myday-section" id="myday-overdue"></div>
+          <div class="myday-section" id="myday-today"></div>
+          <div class="myday-section" id="myday-progress"></div>
+          <div class="myday-section" id="myday-focus"></div>
+          <div class="myday-empty" id="myday-empty" style="display:none">
+            <div class="empty-icon">✨</div>
+            <h3>Your day is clear!</h3>
+            <p>Add tasks to My Day or let AI plan your day.</p>
+            <button class="btn btn-primary" onclick="aiPlanDay()">🧠 AI Plan My Day</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="view-board" class="view">
+        <div class="board-filters">
+          <select id="board-sprint-filter" onchange="loadBoard()">
+            <option value="">All Sprints</option>
+          </select>
+        </div>
+        <div class="board-container" id="board-container"></div>
+      </div>
+
+      <div id="view-list" class="view">
+        <div class="list-filters">
+          <select id="list-status-filter" onchange="loadTaskList()">
+            <option value="">All Statuses</option>
+            <option value="todo">To Do</option>
+            <option value="in-progress">In Progress</option>
+            <option value="done">Done</option>
+            <option value="blocked">Blocked</option>
+          </select>
+          <select id="list-priority-filter" onchange="loadTaskList()">
+            <option value="">All Priorities</option>
+            <option value="urgent">🔴 Urgent</option>
+            <option value="high">🟠 High</option>
+            <option value="medium">🟡 Medium</option>
+            <option value="low">🟢 Low</option>
+          </select>
+          <select id="list-sprint-filter" onchange="loadTaskList()">
+            <option value="">All Sprints</option>
+          </select>
+        </div>
+        <div class="task-list" id="task-list"></div>
+      </div>
+
+      <div id="view-sprints" class="view">
+        <div class="sprint-header-actions">
+          <button class="btn btn-primary" onclick="openCreateSprint()">+ New Sprint</button>
+        </div>
+        <div class="sprints-container" id="sprints-container"></div>
+      </div>
+
+      <div id="view-analytics" class="view">
+        <div class="analytics-grid" id="analytics-grid"></div>
+      </div>
+    </main>
+
+    <!-- Task Detail Slide Panel -->
+    <div class="slide-panel" id="slide-panel">
+      <div class="slide-panel-backdrop" onclick="closeSlidePanel()"></div>
+      <div class="slide-panel-content">
+        <div class="slide-panel-header">
+          <h2 id="panel-title">Task Details</h2>
+          <button class="btn-icon" onclick="closeSlidePanel()">✕</button>
+        </div>
+        <div class="slide-panel-body" id="panel-body"></div>
+      </div>
+    </div>
+
+    <!-- Add Task Modal -->
+    <div class="modal" id="add-task-modal">
+      <div class="modal-backdrop" onclick="closeModal('add-task-modal')"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Create Task</h2>
+          <button class="btn-icon" onclick="closeModal('add-task-modal')">✕</button>
+        </div>
+        <form id="add-task-form" onsubmit="handleAddTask(event)">
+          <div class="form-group">
+            <label>Title *</label>
+            <input type="text" id="task-title" required placeholder="What needs to be done?" autofocus>
+          </div>
+          <div class="form-group">
+            <label>Description</label>
+            <textarea id="task-desc" rows="3" placeholder="Add details..."></textarea>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Priority</label>
+              <select id="task-priority">
+                <option value="medium">🟡 Medium</option>
+                <option value="urgent">🔴 Urgent</option>
+                <option value="high">🟠 High</option>
+                <option value="low">🟢 Low</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Status</label>
+              <select id="task-status">
+                <option value="todo">To Do</option>
+                <option value="in-progress">In Progress</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Due Date</label>
+              <input type="date" id="task-due">
+            </div>
+            <div class="form-group">
+              <label>Sprint</label>
+              <select id="task-sprint">
+                <option value="">None</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Estimated Hours</label>
+              <input type="number" id="task-estimate" min="0" step="0.5" placeholder="0">
+            </div>
+            <div class="form-group">
+              <label>Assignee</label>
+              <input type="text" id="task-assignee" placeholder="GitHub username">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="task-myday">
+              <span>⭐ Add to My Day</span>
+            </label>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="closeModal('add-task-modal')">Cancel</button>
+            <button type="submit" class="btn btn-primary">Create Task</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Create Sprint Modal -->
+    <div class="modal" id="create-sprint-modal">
+      <div class="modal-backdrop" onclick="closeModal('create-sprint-modal')"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Create Sprint</h2>
+          <button class="btn-icon" onclick="closeModal('create-sprint-modal')">✕</button>
+        </div>
+        <form id="create-sprint-form" onsubmit="handleCreateSprint(event)">
+          <div class="form-group">
+            <label>Sprint Name *</label>
+            <input type="text" id="sprint-name" required placeholder="e.g., Sprint 1">
+          </div>
+          <div class="form-group">
+            <label>Description</label>
+            <textarea id="sprint-desc" rows="2" placeholder="Sprint goals..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>Due Date</label>
+            <input type="date" id="sprint-due">
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="closeModal('create-sprint-modal')">Cancel</button>
+            <button type="submit" class="btn btn-primary">Create Sprint</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Toast container -->
+    <div id="toast-container"></div>
+
+    <!-- Loading overlay -->
+    <div class="loading-overlay" id="loading-overlay">
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
