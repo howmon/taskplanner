@@ -1,61 +1,53 @@
-import { Octokit } from '@octokit/rest';
-import { getConfig } from './config.js';
+/**
+ * TaskPlanner — GitHub Integration via gh CLI
+ *
+ * All GitHub operations use the `gh` CLI installed on the system.
+ * Authentication, rate-limiting, and repo detection are handled by gh.
+ *
+ * Simple reads  → gh issue list/view  (fast, purpose-built)
+ * Complex writes → gh api             (full REST control)
+ * Labels        → gh label create     (with --force for idempotency)
+ */
+
+import { gh, ghJson, ghApi, getRepoInfo, getRepoSlug, ISSUE_FIELDS } from './ghcli.js';
 import {
-  STATUS_LABELS, PRIORITY_LABELS, LABEL_COLORS,
-  LABEL_DESCRIPTIONS, PRIORITY_ORDER
+  STATUS_LABELS, PRIORITY_LABELS,
+  LABEL_COLORS, LABEL_DESCRIPTIONS,
+  PRIORITY_ORDER,
 } from '../types/index.js';
 
-let _octokit = null;
-let _config = null;
-
-function getOctokit() {
-  if (!_octokit) {
-    _config = getConfig();
-    _octokit = new Octokit({ auth: _config.token });
-  }
-  return { octokit: _octokit, owner: _config.owner, repo: _config.repo };
-}
-
-// ─── YAML Front-Matter Parsing ─────────────────────────────────────────
+// ─── YAML Front-Matter ─────────────────────────────────────────────────
 
 function parseYamlFrontMatter(body) {
   if (!body) return { meta: {}, description: '' };
-
   const match = body.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!match) return { meta: {}, description: body };
 
-  const yamlStr = match[1];
-  const description = match[2].trim();
   const meta = {};
-
-  for (const line of yamlStr.split('\n')) {
-    const kv = line.match(/^(\w+):\s*(.*)$/);
-    if (kv) {
-      let value = kv[2].trim();
-      if (value === 'true') value = true;
-      else if (value === 'false') value = false;
-      else if (value === 'null' || value === '') value = null;
-      else if (/^\d+$/.test(value)) value = parseInt(value, 10);
-      else if (/^\d+\.\d+$/.test(value)) value = parseFloat(value);
-      else if (value.startsWith('[') && value.endsWith(']')) {
-        value = value.slice(1, -1).split(',').map(s => s.trim()).filter(Boolean);
-      }
-      meta[kv[1]] = value;
-    }
+  const lines = match[1].split('\n');
+  for (const line of lines) {
+    const idx = line.indexOf(':');
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim();
+    let value = line.slice(idx + 1).trim();
+    if (value === 'true') value = true;
+    else if (value === 'false') value = false;
+    else if (value === 'null' || value === '') value = null;
+    else if (!isNaN(value) && value !== '') value = Number(value);
+    meta[key] = value;
   }
-
-  return { meta, description };
+  return { meta, description: match[2].trim() };
 }
 
 function buildYamlFrontMatter(meta, description) {
   const lines = ['---'];
-  if (meta.priority) lines.push(`priority: ${meta.priority}`);
-  if (meta.due_date) lines.push(`due_date: ${meta.due_date}`);
-  lines.push(`estimated_hours: ${meta.estimated_hours || 0}`);
-  lines.push(`actual_hours: ${meta.actual_hours || 0}`);
-  if (meta.tags?.length) lines.push(`tags: [${meta.tags.join(', ')}]`);
-  lines.push(`my_day: ${meta.my_day || false}`);
-  if (meta.parent_task) lines.push(`parent_task: ${meta.parent_task}`);
+  for (const [key, value] of Object.entries(meta)) {
+    if (Array.isArray(value)) {
+      lines.push(`${key}: ${value.join(', ')}`);
+    } else {
+      lines.push(`${key}: ${value}`);
+    }
+  }
   lines.push('---');
   lines.push('');
   lines.push(description || '');
@@ -88,16 +80,22 @@ function getUserLabels(labels) {
 // ─── Issue → Task Conversion ───────────────────────────────────────────
 
 function issueToTask(issue) {
-  const { meta, description } = parseYamlFrontMatter(issue.body);
+  const body = issue.body || '';
+  const { meta, description } = parseYamlFrontMatter(body);
+
+  // Normalize labels — handles both gh CLI JSON and REST API formats
+  const labels = (issue.labels || []).map(l => typeof l === 'string' ? { name: l } : l);
+
   return {
     id: issue.number,
     title: issue.title,
     body: description,
-    status: getStatusFromLabels(issue.labels),
-    priority: getPriorityFromLabels(issue.labels) || meta.priority || 'medium',
+    status: getStatusFromLabels(labels),
+    priority: getPriorityFromLabels(labels) || meta.priority || 'medium',
     due_date: meta.due_date || null,
-    labels: getUserLabels(issue.labels),
-    assignee: issue.assignee?.login || null,
+    labels: getUserLabels(labels),
+    // gh CLI → assignees[]; REST API → assignee + assignees
+    assignee: issue.assignees?.[0]?.login || issue.assignee?.login || null,
     sprint_id: issue.milestone?.number || null,
     sprint_name: issue.milestone?.title || null,
     my_day: meta.my_day || false,
@@ -105,41 +103,47 @@ function issueToTask(issue) {
     actual_hours: meta.actual_hours || 0,
     tags: meta.tags || [],
     parent_task: meta.parent_task || null,
-    created_at: issue.created_at,
-    updated_at: issue.updated_at,
-    html_url: issue.html_url,
+    // gh CLI → camelCase; REST API → snake_case
+    created_at: issue.createdAt || issue.created_at || '',
+    updated_at: issue.updatedAt || issue.updated_at || '',
+    // REST API: html_url = browser link, url = API link
+    // gh CLI:   url = browser link
+    html_url: issue.html_url || issue.url || '',
   };
 }
 
 // ─── Initialization ────────────────────────────────────────────────────
 
 export async function initializeRepo() {
-  const { octokit, owner, repo } = getOctokit();
-
+  const slug = getRepoSlug();
   const allLabels = { ...STATUS_LABELS, ...PRIORITY_LABELS };
-  const existing = await octokit.issues.listLabelsForRepo({ owner, repo, per_page: 100 });
-  const existingNames = existing.data.map(l => l.name);
-
   const created = [];
+
   for (const [key, labelName] of Object.entries(allLabels)) {
-    if (!existingNames.includes(labelName)) {
-      await octokit.issues.createLabel({
-        owner, repo,
-        name: labelName,
-        color: LABEL_COLORS[labelName],
-        description: LABEL_DESCRIPTIONS[labelName],
-      });
+    try {
+      gh('label', 'create', labelName,
+        '--color', LABEL_COLORS[labelName] || 'ededed',
+        '--description', LABEL_DESCRIPTIONS[labelName] || '',
+        '--force',
+        '-R', slug
+      );
       created.push(labelName);
+    } catch {
+      // --force handles updates; ignore rare failures
     }
   }
 
-  return { created, existing: existingNames.filter(n => n.startsWith('tp:')) };
+  // Get existing tp: labels
+  const labels = ghJson('label', 'list', '--json', 'name', '-R', slug) || [];
+  const existing = labels.map(l => l.name).filter(n => n.startsWith('tp:'));
+
+  return { created, existing };
 }
 
 // ─── Task CRUD ─────────────────────────────────────────────────────────
 
 export async function createTask(title, options = {}) {
-  const { octokit, owner, repo } = getOctokit();
+  const { owner, repo } = getRepoInfo();
 
   const {
     priority = 'medium',
@@ -162,46 +166,51 @@ export async function createTask(title, options = {}) {
   const meta = { priority, due_date, estimated_hours, actual_hours: 0, tags, my_day, parent_task };
   const body = buildYamlFrontMatter(meta, description);
 
-  const params = {
-    owner, repo, title, body, labels,
-  };
-  if (assignee) params.assignees = [assignee];
-  if (sprint_id) params.milestone = sprint_id;
+  // gh api supports full JSON payloads (arrays for labels/assignees)
+  const payload = { title, body, labels };
+  if (assignee) payload.assignees = [assignee];
+  if (sprint_id) payload.milestone = sprint_id;
 
-  const { data } = await octokit.issues.create(params);
+  const data = ghApi(`repos/${owner}/${repo}/issues`, {
+    method: 'POST',
+    input: payload,
+  });
+
   return issueToTask(data);
 }
 
 export async function getTask(taskId) {
-  const { octokit, owner, repo } = getOctokit();
-  const { data } = await octokit.issues.get({ owner, repo, issue_number: taskId });
+  const slug = getRepoSlug();
+  const data = ghJson('issue', 'view', String(taskId),
+    '--json', ISSUE_FIELDS, '-R', slug);
   return issueToTask(data);
 }
 
 export async function updateTask(taskId, updates) {
-  const { octokit, owner, repo } = getOctokit();
+  const { owner, repo } = getRepoInfo();
+  const slug = `${owner}/${repo}`;
 
-  // Get current issue
-  const { data: current } = await octokit.issues.get({ owner, repo, issue_number: taskId });
-  const { meta, description } = parseYamlFrontMatter(current.body);
+  // 1. Read current issue via gh CLI
+  const current = ghJson('issue', 'view', String(taskId),
+    '--json', ISSUE_FIELDS, '-R', slug);
 
-  // Build updated labels
-  let currentLabels = current.labels.map(l => l.name);
+  const { meta, description } = parseYamlFrontMatter(current.body || '');
 
-  // Update status label
+  // 2. Compute updated labels
+  let currentLabels = (current.labels || []).map(l => l.name);
+
   if (updates.status) {
     currentLabels = currentLabels.filter(l => !Object.values(STATUS_LABELS).includes(l));
     currentLabels.push(STATUS_LABELS[updates.status]);
   }
 
-  // Update priority label
   if (updates.priority) {
     currentLabels = currentLabels.filter(l => !Object.values(PRIORITY_LABELS).includes(l));
     currentLabels.push(PRIORITY_LABELS[updates.priority]);
     meta.priority = updates.priority;
   }
 
-  // Update meta
+  // 3. Update metadata
   if (updates.due_date !== undefined) meta.due_date = updates.due_date;
   if (updates.my_day !== undefined) meta.my_day = updates.my_day;
   if (updates.estimated_hours !== undefined) meta.estimated_hours = updates.estimated_hours;
@@ -211,54 +220,85 @@ export async function updateTask(taskId, updates) {
 
   const body = buildYamlFrontMatter(meta, updates.description ?? description);
 
-  const params = {
-    owner, repo, issue_number: taskId,
+  // 4. Build API payload
+  const payload = {
     title: updates.title || current.title,
     body,
     labels: currentLabels,
   };
 
   if (updates.status === 'done') {
-    params.state = 'closed';
-    params.state_reason = 'completed';
+    payload.state = 'closed';
+    payload.state_reason = 'completed';
   } else if (updates.status && updates.status !== 'done' && current.state === 'closed') {
-    params.state = 'open';
+    payload.state = 'open';
   }
 
   if (updates.assignee !== undefined) {
-    params.assignees = updates.assignee ? [updates.assignee] : [];
+    payload.assignees = updates.assignee ? [updates.assignee] : [];
   }
   if (updates.sprint_id !== undefined) {
-    params.milestone = updates.sprint_id;
+    payload.milestone = updates.sprint_id;
   }
 
-  const { data } = await octokit.issues.update(params);
+  // 5. PATCH via gh api (handles labels as arrays, state changes, etc.)
+  const data = ghApi(`repos/${owner}/${repo}/issues/${taskId}`, {
+    method: 'PATCH',
+    input: payload,
+  });
+
   return issueToTask(data);
 }
 
 export async function listTasks(filters = {}) {
-  const { octokit, owner, repo } = getOctokit();
+  const slug = getRepoSlug();
 
-  const params = {
-    owner, repo,
-    per_page: 100,
-    state: filters.status === 'done' ? 'closed' : (filters.include_done ? 'all' : 'open'),
-  };
+  const args = ['issue', 'list',
+    '--json', ISSUE_FIELDS,
+    '--limit', '100',
+    '-R', slug,
+  ];
 
-  if (filters.sprint_id) params.milestone = filters.sprint_id;
-  if (filters.assignee) params.assignee = filters.assignee;
+  // State filter
+  if (filters.status === 'done') {
+    args.push('--state', 'closed');
+  } else if (filters.include_done) {
+    args.push('--state', 'all');
+  } else {
+    args.push('--state', 'open');
+  }
 
-  const labels = [];
-  if (filters.status && filters.status !== 'done') labels.push(STATUS_LABELS[filters.status]);
-  if (filters.priority) labels.push(PRIORITY_LABELS[filters.priority]);
-  if (labels.length) params.labels = labels.join(',');
+  // Label filters
+  if (filters.status && filters.status !== 'done') {
+    args.push('--label', STATUS_LABELS[filters.status]);
+  }
+  if (filters.priority) {
+    args.push('--label', PRIORITY_LABELS[filters.priority]);
+  }
 
-  const { data } = await octokit.issues.listForRepo(params);
+  // Assignee filter
+  if (filters.assignee) {
+    args.push('--assignee', filters.assignee);
+  }
+
+  // Sprint/milestone filter — gh uses milestone title, so we look it up
+  if (filters.sprint_id) {
+    try {
+      const { owner, repo } = getRepoInfo();
+      const milestone = ghApi(`repos/${owner}/${repo}/milestones/${filters.sprint_id}`);
+      if (milestone?.title) {
+        args.push('--milestone', milestone.title);
+      }
+    } catch {
+      // Milestone not found, skip filter
+    }
+  }
+
+  const issues = ghJson(...args) || [];
 
   // Filter to only TaskPlanner issues (have tp: labels)
-  let tasks = data
-    .filter(issue => !issue.pull_request)
-    .filter(issue => issue.labels.some(l => l.name.startsWith('tp:')))
+  let tasks = issues
+    .filter(issue => issue.labels?.some(l => l.name?.startsWith('tp:')))
     .map(issueToTask);
 
   // Filter by my_day
@@ -281,24 +321,24 @@ export async function listTasks(filters = {}) {
 }
 
 export async function deleteTask(taskId) {
-  const { octokit, owner, repo } = getOctokit();
-  await octokit.issues.update({
-    owner, repo, issue_number: taskId,
-    state: 'closed',
-    state_reason: 'not_planned',
-  });
+  const slug = getRepoSlug();
+  gh('issue', 'close', String(taskId), '--reason', 'not planned', '-R', slug);
 }
 
 // ─── Sprint (Milestone) Management ─────────────────────────────────────
 
 export async function createSprint(title, options = {}) {
-  const { octokit, owner, repo } = getOctokit();
+  const { owner, repo } = getRepoInfo();
 
-  const params = { owner, repo, title };
-  if (options.description) params.description = options.description;
-  if (options.due_date) params.due_on = new Date(options.due_date).toISOString();
+  const payload = { title };
+  if (options.description) payload.description = options.description;
+  if (options.due_date) payload.due_on = new Date(options.due_date).toISOString();
 
-  const { data } = await octokit.issues.createMilestone(params);
+  const data = ghApi(`repos/${owner}/${repo}/milestones`, {
+    method: 'POST',
+    input: payload,
+  });
+
   return {
     id: data.number,
     title: data.title,
@@ -312,10 +352,10 @@ export async function createSprint(title, options = {}) {
 }
 
 export async function listSprints(state = 'open') {
-  const { octokit, owner, repo } = getOctokit();
-  const { data } = await octokit.issues.listMilestones({
-    owner, repo, state, sort: 'due_on', direction: 'desc',
-  });
+  const { owner, repo } = getRepoInfo();
+  const data = ghApi(`repos/${owner}/${repo}/milestones?state=${state}&sort=due_on&direction=desc`);
+
+  if (!Array.isArray(data)) return [];
 
   return data.map(m => ({
     id: m.number,
@@ -330,10 +370,13 @@ export async function listSprints(state = 'open') {
 }
 
 export async function closeSprint(sprintId) {
-  const { octokit, owner, repo } = getOctokit();
-  const { data } = await octokit.issues.updateMilestone({
-    owner, repo, milestone_number: sprintId, state: 'closed',
+  const { owner, repo } = getRepoInfo();
+
+  const data = ghApi(`repos/${owner}/${repo}/milestones/${sprintId}`, {
+    method: 'PATCH',
+    input: { state: 'closed' },
   });
+
   return {
     id: data.number,
     title: data.title,
@@ -408,18 +451,11 @@ export async function getMyDayTasks() {
   const tasks = await listTasks();
   const today = new Date().toISOString().split('T')[0];
 
-  // Get tasks explicitly added to My Day
   const myDayTasks = tasks.filter(t => t.my_day && t.status !== 'done');
-
-  // Also include tasks due today
   const dueToday = tasks.filter(t => t.due_date === today && t.status !== 'done' && !t.my_day);
-
-  // Also include overdue tasks
   const overdueTasks = tasks.filter(t =>
     t.due_date && t.due_date < today && t.status !== 'done' && !t.my_day
   );
-
-  // Also include in-progress tasks
   const inProgress = tasks.filter(t =>
     t.status === 'in-progress' && !t.my_day && t.due_date !== today
   );

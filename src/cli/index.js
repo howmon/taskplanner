@@ -10,7 +10,7 @@ import {
   deleteTask, createSprint, listSprints, closeSprint,
   getBoardData, getAnalytics, getMyDayTasks, toggleMyDay,
 } from '../core/github.js';
-import { sendNotification, sendMorningBriefing, sendOverdueAlert } from '../core/notifications.js';
+import { sendNotification, sendMorningBriefing, sendOverdueAlert, sendTaskCompleted } from '../core/notifications.js';
 import { planMyDay, decomposeTask, isAIAvailable } from '../core/ai.js';
 import { startServer } from '../web/server.js';
 
@@ -551,6 +551,91 @@ program
         }
       }
       console.log();
+    } catch (error) {
+      spinner.fail(`Failed: ${error.message}`);
+    }
+  });
+
+// ─── Done / Complete (Quick Action) ────────────────────────────────────
+
+program
+  .command('done <ids...>')
+  .alias('complete')
+  .description('Mark task(s) as done ✅')
+  .action(async (ids) => {
+    for (const rawId of ids) {
+      const id = parseInt(rawId);
+      if (isNaN(id)) {
+        console.log(chalk.red(`  ✗ Invalid task ID: ${rawId}`));
+        continue;
+      }
+      const spinner = ora(`Completing #${id}...`).start();
+      try {
+        const task = await updateTask(id, { status: 'done' });
+        spinner.succeed(`✅ #${task.id} ${task.title} — done!`);
+        try { await sendTaskCompleted(task); } catch { /* notification optional */ }
+      } catch (error) {
+        spinner.fail(`Failed to complete #${id}: ${error.message}`);
+      }
+    }
+  });
+
+// ─── Start (Quick Action) ──────────────────────────────────────────────
+
+program
+  .command('start <id>')
+  .description('Start working on a task (→ in-progress)')
+  .action(async (id) => {
+    const spinner = ora(`Starting #${id}...`).start();
+    try {
+      const task = await updateTask(parseInt(id), { status: 'in-progress' });
+      spinner.succeed(`🔄 #${task.id} ${task.title} — in progress`);
+    } catch (error) {
+      spinner.fail(`Failed: ${error.message}`);
+    }
+  });
+
+// ─── Block (Quick Action) ──────────────────────────────────────────────
+
+program
+  .command('block <id>')
+  .description('Mark a task as blocked')
+  .action(async (id) => {
+    const spinner = ora(`Blocking #${id}...`).start();
+    try {
+      const task = await updateTask(parseInt(id), { status: 'blocked' });
+      spinner.succeed(`🚫 #${task.id} ${task.title} — blocked`);
+    } catch (error) {
+      spinner.fail(`Failed: ${error.message}`);
+    }
+  });
+
+// ─── Reopen (Undo Complete) ────────────────────────────────────────────
+
+program
+  .command('reopen <id>')
+  .description('Reopen a completed task (→ todo)')
+  .action(async (id) => {
+    const spinner = ora(`Reopening #${id}...`).start();
+    try {
+      const task = await updateTask(parseInt(id), { status: 'todo' });
+      spinner.succeed(`⬜ #${task.id} ${task.title} — reopened`);
+    } catch (error) {
+      spinner.fail(`Failed: ${error.message}`);
+    }
+  });
+
+// ─── Delete Task ───────────────────────────────────────────────────────
+
+program
+  .command('delete <id>')
+  .alias('rm')
+  .description('Delete a task (close as not-planned)')
+  .action(async (id) => {
+    const spinner = ora(`Deleting #${id}...`).start();
+    try {
+      await deleteTask(parseInt(id));
+      spinner.succeed(`🗑️  #${id} deleted`);
     } catch (error) {
       spinner.fail(`Failed: ${error.message}`);
     }
